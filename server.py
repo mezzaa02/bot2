@@ -13,9 +13,9 @@ app = Flask(__name__)
 BASE_PATH = "./"
 
 # Archivos que contienen los números que ya han recibido los mensajes
-sent_numbers_file = os.path.join(BASE_PATH, "sent_numbers.txt")
-precio_file = os.path.join(BASE_PATH, "precio.txt")
-tienda_file = os.path.join(BASE_PATH, "tienda.txt")  # Archivo para la regla "tienda"
+sent_numbers_file = os.path.join(BASE_PATH/datos/, "sent_numbers.txt")
+precio_file = os.path.join(BASE_PATH/datos/, "precio.txt")
+tienda_file = os.path.join(BASE_PATH/datos/, "tienda.txt")  # Archivo para la regla "tienda"
 
 # Bloqueos para acceso a archivos
 sent_numbers_lock = Lock()
