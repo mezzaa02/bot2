@@ -25,7 +25,7 @@ tienda_file_lock = Lock()
 # Nombres de los archivos PDF
 pdf_names = [
     "RELOJES de Caballero.pdf",
-    "CARTERAS de Dama.pdf",
+    "CARTERAS.pdf",
     "RELOJES de Dama.pdf",
     "MORRALES de Dama.pdf",
     "MORRALES de Caballero.pdf"
