@@ -2,6 +2,6 @@ sudo thunar
 
 /var/lib/docker/overlay2/7c512856696faf89bdfffddaa4dd1bb3c40628514ce9c2e3c0e58f887fa6e899/diff/app/
 
-gunicorn -b 0.0.0.0:8765 server:app
+gunicorn -b 0.0.0.0:8765 server:app --workers 9 --threads 2 --worker-class gthread
 
 
