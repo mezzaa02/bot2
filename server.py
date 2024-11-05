@@ -41,7 +41,7 @@ welcome_video_files = [
     #os.path.join(BASE_PATH, "video2.mp4"),
     #os.path.join(BASE_PATH, "video3.mp4"),
     #os.path.join(BASE_PATH, "video4.mp4"),
-    os.path.join(BASE_PATH, "video2.mp4")
+    os.path.join(BASE_PATH, "video3.mp4")
 ]
 
 # Nombres de los archivos de video para 'tienda'
