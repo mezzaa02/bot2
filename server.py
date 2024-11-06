@@ -51,6 +51,7 @@ tienda_video_files = [
 # Nombres de los archivos de imagen para 'tienda'
 image_names = [
     "tienda1.jpeg",
+    "tienda3.jpeg",
     "tienda2.jpeg"
 ]
 image_files = [os.path.join(BASE_PATH, img) for img in image_names]
@@ -638,11 +639,11 @@ def send_tienda_messages(sender):
         send_video(sender, video_name, caption=video_caption)
         time.sleep(1)
 
-        # Enviar el mensaje de texto
-        message = """*Contraentrega* en toda Tacna 
-
-Entregamos *personalmente a domicilio*"""
-        send_message(sender, message)
+        # Enviar la 3er imagen con su caption
+        image3_name = "tienda3.jpeg"
+        image3_caption = "Contraentrega en toda Tacna, entregamos personalmente a domicilio"
+        send_image(sender, image3_name, image3_caption)
+        time.sleep(1)
 
         mark_as_tienda_sent(sender)
     finally:
