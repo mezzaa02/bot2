@@ -4,8 +4,10 @@ import requests
 from flask import Flask, request, jsonify
 import os
 import threading
-from threading import Lock
-import unicodedata  # Importado para normalizar textos y eliminar tildes
+import unicodedata
+import redis
+import time
+from filelock import FileLock  # Import FileLock for file synchronization
 
 app = Flask(__name__)
 
@@ -20,10 +22,10 @@ sent_numbers_file = os.path.join(DATA_PATH, "sent_numbers.txt")
 precio_file = os.path.join(DATA_PATH, "precio.txt")
 tienda_file = os.path.join(DATA_PATH, "tienda.txt")  # Archivo para la regla "tienda"
 
-# Bloqueos para acceso a archivos
-sent_numbers_lock = Lock()
-precio_file_lock = Lock()
-tienda_file_lock = Lock()
+# Nombres de los archivos de lock
+sent_numbers_lock_file = sent_numbers_file + ".lock"
+precio_lock_file = precio_file + ".lock"
+tienda_lock_file = tienda_file + ".lock"
 
 # Nombres de los archivos PDF
 pdf_names = [
@@ -38,9 +40,6 @@ pdf_files = [os.path.join(BASE_PATH, pdf) for pdf in pdf_names]
 # Nombres de los archivos de video para bienvenida
 welcome_video_files = [
     os.path.join(BASE_PATH, "video1.mp4"),
-    #os.path.join(BASE_PATH, "video2.mp4"),
-    #os.path.join(BASE_PATH, "video3.mp4"),
-    #os.path.join(BASE_PATH, "video4.mp4"),
     os.path.join(BASE_PATH, "video3.mp4")
 ]
 
@@ -75,15 +74,13 @@ wuzapi_url_video = "http://localhost:8080/chat/send/video"
 wuzapi_url_image = "http://localhost:8080/chat/send/image"
 wuzapi_token = "jhon"
 
-# Diccionarios para manejar las sesiones y bloqueos por usuario
-active_sessions = {}  # Cambiado para ser un diccionario de diccionarios
-session_locks = {}
+# Inicializar el cliente de Redis
+redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
 # Precodificar los PDFs, videos y imágenes
 encoded_pdfs = {}
 encoded_videos = {}
 encoded_images = {}
-
 
 def precodificar_archivos():
     """Precarga y codifica los archivos PDF, videos y imágenes."""
@@ -103,53 +100,68 @@ def precodificar_archivos():
         encoded_image = encode_file_to_base64(image_filename)
         encoded_images[image_name] = encoded_image
 
-
 def encode_file_to_base64(file_path):
     with open(file_path, "rb") as file:
         return base64.b64encode(file.read()).decode('utf-8')
 
+def load_data_to_redis():
+    """Carga los datos de los archivos a Redis al iniciar la aplicación."""
+    # Cargar sent_numbers
+    with FileLock(sent_numbers_lock_file):
+        if os.path.exists(sent_numbers_file):
+            with open(sent_numbers_file, 'r') as file:
+                numbers = [line.strip() for line in file if line.strip()]
+                if numbers:
+                    redis_client.sadd('sent_numbers', *numbers)
+                    print(f"Cargados {len(numbers)} números en 'sent_numbers'")
+
+    # Cargar precio_numbers
+    with FileLock(precio_lock_file):
+        if os.path.exists(precio_file):
+            with open(precio_file, 'r') as file:
+                numbers = [line.strip() for line in file if line.strip()]
+                if numbers:
+                    redis_client.sadd('precio_numbers', *numbers)
+                    print(f"Cargados {len(numbers)} números en 'precio_numbers'")
+
+    # Cargar tienda_numbers
+    with FileLock(tienda_lock_file):
+        if os.path.exists(tienda_file):
+            with open(tienda_file, 'r') as file:
+                numbers = [line.strip() for line in file if line.strip()]
+                if numbers:
+                    redis_client.sadd('tienda_numbers', *numbers)
+                    print(f"Cargados {len(numbers)} números en 'tienda_numbers'")
 
 def has_received_catalog(phone_number):
-    if not os.path.exists(sent_numbers_file):
-        return False
-    with sent_numbers_lock:
-        with open(sent_numbers_file, 'r') as file:
-            return phone_number in file.read()
-
+    return redis_client.sismember('sent_numbers', phone_number)
 
 def mark_as_sent(phone_number):
-    with sent_numbers_lock:
+    redis_client.sadd('sent_numbers', phone_number)
+    # Escribir en el archivo bajo lock
+    with FileLock(sent_numbers_lock_file):
         with open(sent_numbers_file, 'a') as file:
             file.write(phone_number + '\n')
 
-
 def has_received_precio(phone_number):
-    if not os.path.exists(precio_file):
-        return False
-    with precio_file_lock:
-        with open(precio_file, 'r') as file:
-            return phone_number in file.read()
-
+    return redis_client.sismember('precio_numbers', phone_number)
 
 def mark_as_precio_sent(phone_number):
-    with precio_file_lock:
+    redis_client.sadd('precio_numbers', phone_number)
+    # Escribir en el archivo bajo lock
+    with FileLock(precio_lock_file):
         with open(precio_file, 'a') as file:
             file.write(phone_number + '\n')
 
-
 def has_received_tienda(phone_number):
-    if not os.path.exists(tienda_file):
-        return False
-    with tienda_file_lock:
-        with open(tienda_file, 'r') as file:
-            return phone_number in file.read()
-
+    return redis_client.sismember('tienda_numbers', phone_number)
 
 def mark_as_tienda_sent(phone_number):
-    with tienda_file_lock:
+    redis_client.sadd('tienda_numbers', phone_number)
+    # Escribir en el archivo bajo lock
+    with FileLock(tienda_lock_file):
         with open(tienda_file, 'a') as file:
             file.write(phone_number + '\n')
-
 
 def send_message(phone_number, message_text):
     """Función para enviar un mensaje de texto."""
@@ -158,9 +170,14 @@ def send_message(phone_number, message_text):
         "Phone": phone_number,
         "Body": message_text
     }
-    response = requests.post(wuzapi_url_text, json=payload, headers={"token": wuzapi_token})
-    print(f"Respuesta de Wuzapi: {response.json()}")
-
+    try:
+        response = requests.post(wuzapi_url_text, json=payload, headers={"token": wuzapi_token})
+        response_json = response.json()
+        print(f"Respuesta de Wuzapi: {response_json}")
+        if not response_json.get('success', False):
+            print(f"Error sending message to {phone_number}: {response_json.get('error')}")
+    except Exception as e:
+        print(f"Exception occurred while sending message: {e}")
 
 def send_pdf(phone_number, pdf_name):
     """Función para enviar un PDF precodificado."""
@@ -174,9 +191,14 @@ def send_pdf(phone_number, pdf_name):
         "Document": f"data:application/octet-stream;base64,{encoded_pdf}",
         "FileName": pdf_name
     }
-    response = requests.post(wuzapi_url_document, json=payload, headers={"token": wuzapi_token})
-    print(f"Respuesta de Wuzapi: {response.json()}")
-
+    try:
+        response = requests.post(wuzapi_url_document, json=payload, headers={"token": wuzapi_token})
+        response_json = response.json()
+        print(f"Respuesta de Wuzapi: {response_json}")
+        if not response_json.get('success', False):
+            print(f"Error sending PDF to {phone_number}: {response_json.get('error')}")
+    except Exception as e:
+        print(f"Exception occurred while sending PDF: {e}")
 
 def send_video(phone_number, video_name, caption=None):
     """Función para enviar un video precodificado."""
@@ -194,16 +216,21 @@ def send_video(phone_number, video_name, caption=None):
         payload["Caption"] = caption
     elif video_name == "video1.mp4":
         payload["Caption"] = first_video_message
-    response = requests.post(wuzapi_url_video, json=payload, headers={"token": wuzapi_token})
-    print(f"Respuesta de Wuzapi: {response.json()}")
-
+    try:
+        response = requests.post(wuzapi_url_video, json=payload, headers={"token": wuzapi_token})
+        response_json = response.json()
+        print(f"Respuesta de Wuzapi: {response_json}")
+        if not response_json.get('success', False):
+            print(f"Error sending video to {phone_number}: {response_json.get('error')}")
+    except Exception as e:
+        print(f"Exception occurred while sending video: {e}")
 
 def send_image(phone_number, image_name, caption):
     """Función para enviar una imagen precodificada."""
     print(f"Enviando imagen {image_name} a {phone_number}")
     encoded_image = encoded_images.get(image_name)
     if not encoded_image:
-        print(f"Error: Imagen {image_name} no está precodificado.")
+        print(f"Error: Imagen {image_name} no está precodificada.")
         return
     payload = {
         "Phone": phone_number,
@@ -211,15 +238,19 @@ def send_image(phone_number, image_name, caption):
         "FileName": image_name,
         "Caption": caption
     }
-    response = requests.post(wuzapi_url_image, json=payload, headers={"token": wuzapi_token})
-    print(f"Respuesta de Wuzapi: {response.json()}")
-
+    try:
+        response = requests.post(wuzapi_url_image, json=payload, headers={"token": wuzapi_token})
+        response_json = response.json()
+        print(f"Respuesta de Wuzapi: {response_json}")
+        if not response_json.get('success', False):
+            print(f"Error sending image to {phone_number}: {response_json.get('error')}")
+    except Exception as e:
+        print(f"Exception occurred while sending image: {e}")
 
 def remove_accents(input_str):
     """Función para eliminar tildes y acentos de un texto."""
     nfkd_form = unicodedata.normalize('NFKD', input_str)
     return ''.join([c for c in nfkd_form if not unicodedata.combining(c)])
-
 
 def start_wuzapi():
     # URL de inicio de sesión
@@ -237,6 +268,12 @@ def start_wuzapi():
     except requests.exceptions.RequestException as e:
         print(f"Error de conexión: {e}")
 
+def acquire_lock(phone_number):
+    """Adquiere un lock distribuido para el número de teléfono."""
+    lock_name = f"lock:{phone_number}"
+    lock = redis_client.lock(lock_name, timeout=30, blocking_timeout=5)
+    acquired = lock.acquire(blocking=True)
+    return lock if acquired else None
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -254,7 +291,9 @@ def webhook():
 
     try:
         sender_full = data['jsonData']['event']['Info']['Sender']
-        sender = sender_full.split('@')[0]  # Extraer solo el número de teléfono
+        sender = sender_full.split('@')[0]
+        if ':' in sender:
+            sender = sender.split(':')[0]  # Extraer solo el número de teléfono
     except KeyError:
         return jsonify({"error": "Bad Request: No sender found"}), 400
 
@@ -523,17 +562,18 @@ def webhook():
     # Normalizar el texto del mensaje y eliminar tildes
     message_normalized = remove_accents(message_text).lower()
 
-    # Asegurar que solo un hilo procese la interacción de un cliente
-    if sender not in session_locks:
-        session_locks[sender] = Lock()
+    # Adquirir un lock distribuido para el usuario
+    lock = acquire_lock(sender)
+    if not lock:
+        # No se pudo adquirir el lock, otro proceso está manejando este usuario
+        print(f"No se pudo adquirir el lock para {sender}")
+        return jsonify({"status": "busy"}), 200
 
-    with session_locks[sender]:
+    try:
         if not has_received_catalog(sender):
             # Es la primera vez que nos contacta, enviar mensajes de bienvenida
-            if sender not in active_sessions:
-                active_sessions[sender] = {}
-            if 'welcome' not in active_sessions[sender]:
-                active_sessions[sender]['welcome'] = True
+            if not redis_client.hexists(f"active_sessions:{sender}", 'welcome'):
+                redis_client.hset(f"active_sessions:{sender}", 'welcome', 'True')
                 threading.Thread(target=send_welcome_pdfs_videos_to_client, args=(sender,)).start()
             else:
                 print(f"Welcome messages already being sent to {sender}, not starting another thread.")
@@ -542,30 +582,28 @@ def webhook():
             if any(keyword in message_normalized for keyword in tienda_keywords):
                 # Prioridad a la regla "tienda"
                 if not has_received_tienda(sender):
-                    if sender not in active_sessions:
-                        active_sessions[sender] = {}
-                    if 'tienda' not in active_sessions[sender]:
-                        active_sessions[sender]['tienda'] = True
+                    if not redis_client.hexists(f"active_sessions:{sender}", 'tienda'):
+                        redis_client.hset(f"active_sessions:{sender}", 'tienda', 'True')
                         threading.Thread(target=send_tienda_messages, args=(sender,)).start()
                     else:
                         print(f"Tienda messages already being sent to {sender}, not starting another thread.")
                 else:
                     print(f"Tienda messages already sent to {sender}.")
             elif not has_received_precio(sender):
-                if sender not in active_sessions:
-                    active_sessions[sender] = {}
-                if 'precio' not in active_sessions[sender]:
-                    active_sessions[sender]['precio'] = True
+                if not redis_client.hexists(f"active_sessions:{sender}", 'precio'):
+                    redis_client.hset(f"active_sessions:{sender}", 'precio', 'True')
                     threading.Thread(target=send_precio_message, args=(sender,)).start()
                 else:
                     print(f"Precio messages already being sent to {sender}, not starting another thread.")
+    finally:
+        # Liberar el lock
+        lock.release()
 
     return jsonify({"status": "success"}), 200
 
-
 def send_precio_message(sender):
     try:
-        # Enviar los dos mensajes solicitados
+        # Enviar los mensajes solicitados
         messages = [
             "⌚ *Por DOCENA* relojes *50 soles*",
             "¿Cuántas unidades desea llevar? 🙌☺️",
@@ -573,16 +611,11 @@ def send_precio_message(sender):
         ]
         for message in messages:
             send_message(sender, message)
+            time.sleep(1)  # Pequeña pausa entre mensajes
         mark_as_precio_sent(sender)
     finally:
-        # Remover 'precio' de active_sessions[sender]
-        if 'precio' in active_sessions.get(sender, {}):
-            active_sessions[sender].pop('precio', None)
-            if not active_sessions[sender]:
-                active_sessions.pop(sender, None)
-        # Limpiar la sesión y el bloqueo
-        session_locks.pop(sender, None)
-
+        # Remover 'precio' de active_sessions
+        redis_client.hdel(f"active_sessions:{sender}", 'precio')
 
 def send_tienda_messages(sender):
     """Envía las imágenes y video de la tienda al cliente."""
@@ -591,16 +624,19 @@ def send_tienda_messages(sender):
         image1_name = "tienda1.jpeg"
         image1_caption = "📍Tenemos *TIENDA FÍSICA* en la *Zona Franca del Perú* 🚚 *Mz K Lote 08* 🙌🏻✨ 🤩Ciudad de *TACNA, Perú* 🇵🇪"
         send_image(sender, image1_name, image1_caption)
+        time.sleep(1)
 
         # Enviar la segunda imagen con su caption
         image2_name = "tienda2.jpeg"
         image2_caption = "Nosotros somos *PROVEEDORES* de *acá de la Zona Económica Especial de TACNA*✨🤗🫱🏻‍🫲🏻"
         send_image(sender, image2_name, image2_caption)
+        time.sleep(1)
 
         # Enviar el video con su caption
         video_name = "impuestos.mp4"
         video_caption = """🤩Trabajamos en la *Zona Franca del Perú* pues es zona *LIBRE DE IMPUESTOS* 🥳✨🫱🏻‍🫲🏻"""
         send_video(sender, video_name, caption=video_caption)
+        time.sleep(1)
 
         # Enviar el mensaje de texto
         message = """*Contraentrega* en toda Tacna 
@@ -610,14 +646,8 @@ Entregamos *personalmente a domicilio*"""
 
         mark_as_tienda_sent(sender)
     finally:
-        # Remover 'tienda' de active_sessions[sender]
-        if 'tienda' in active_sessions.get(sender, {}):
-            active_sessions[sender].pop('tienda', None)
-            if not active_sessions[sender]:
-                active_sessions.pop(sender, None)
-        # Limpiar la sesión y el bloqueo
-        session_locks.pop(sender, None)
-
+        # Remover 'tienda' de active_sessions
+        redis_client.hdel(f"active_sessions:{sender}", 'tienda')
 
 def send_welcome_pdfs_videos_to_client(sender):
     """Envía los mensajes de bienvenida, PDFs y videos al cliente."""
@@ -625,26 +655,25 @@ def send_welcome_pdfs_videos_to_client(sender):
         # Enviar mensajes de bienvenida
         for message in welcome_messages:
             send_message(sender, message)
+            time.sleep(1)  # Pequeña pausa entre mensajes
 
         # Enviar PDFs
         for pdf_name in pdf_names:
             send_pdf(sender, pdf_name)
+            time.sleep(1)
 
         # Enviar videos
         for video_filename in welcome_video_files:
             video_name = os.path.basename(video_filename)
             send_video(sender, video_name)
+            time.sleep(1)
 
         mark_as_sent(sender)
     finally:
-        # Remover 'welcome' de active_sessions[sender]
-        if 'welcome' in active_sessions.get(sender, {}):
-            active_sessions[sender].pop('welcome', None)
-            if not active_sessions[sender]:
-                active_sessions.pop(sender, None)
-        session_locks.pop(sender, None)
-
+        # Remover 'welcome' de active_sessions
+        redis_client.hdel(f"active_sessions:{sender}", 'welcome')
 
 # Ejecutar inicializaciones al importar el módulo
 precodificar_archivos()
+load_data_to_redis()
 start_wuzapi()
